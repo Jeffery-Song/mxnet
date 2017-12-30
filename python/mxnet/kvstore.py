@@ -389,7 +389,7 @@ class KVStore(object):
             the body of the command.
         """
         check_call(_LIB.MXKVStoreSendCommmandToServers(
-            self.handle, mx_uint(head), c_str(body)))
+            self.handle, mx_uint(head), c_str(body.decode())))
 
 def create(name='local'):
     """Creates a new KVStore.

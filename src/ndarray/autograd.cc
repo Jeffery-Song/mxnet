@@ -83,15 +83,15 @@ void AutogradRuntime::RecordImperativeFCompute(const nnvm::Op* op,
                                                const nnvm::NodeAttrs& attrs,
                                                std::vector<NDArray> *p_inputs,
                                                std::vector<NDArray> *p_outputs) {
-  RecordOp(op, attrs, p_inputs, p_outputs, nullptr);
+  RecordOp(op, attrs, p_inputs, p_outputs, OpStatePtr());
 }
 
-void AutogradRuntime::RecordImperativeOperator(const std::shared_ptr<Operator>& opr,
+void AutogradRuntime::RecordImperativeOperator(const OpStatePtr& state,
                                                const nnvm::Op* op,
                                                const nnvm::NodeAttrs& attrs,
                                                std::vector<NDArray> *p_inputs,
                                                std::vector<NDArray> *p_outputs) {
-  RecordOp(op, attrs, p_inputs, p_outputs, opr);
+  RecordOp(op, attrs, p_inputs, p_outputs, state);
 }
 
 std::shared_ptr<AutogradRuntime> AutogradRuntime::_GetSharedRef() {
@@ -108,7 +108,7 @@ AGNodePtr AutogradRuntime::RecordOp(const nnvm::Op* op,
                                     const nnvm::NodeAttrs& attrs,
                                     std::vector<NDArray> *p_inputs,
                                     std::vector<NDArray> *p_outputs,
-                                    const std::shared_ptr<Operator>& opr) {
+                                    const OpStatePtr& state) {
   std::vector<NDArray>& inputs  = *p_inputs;
   std::vector<NDArray>& outputs = *p_outputs;
 
@@ -117,18 +117,7 @@ AGNodePtr AutogradRuntime::RecordOp(const nnvm::Op* op,
   nn_node->attrs.name = "node_" + std::to_string(node_count_++);
 
   AGNodePtr ag_node = AGNode::Create(nn_node);
-  ag_node->opr = opr;
-
-  for (uint32_t i = 0; i < outputs.size(); ++i) {
-    CHECK(outputs[i].entry_.is_none())
-      << "Output NDArray is non-empty and already in another computation graph. "
-      << "Assigning to it will cause undefined behavior when evaluating gradients. "
-      << "Please call backward first to clear the graph or do this out side of "
-      << "a train section. ";
-    outputs[i].entry_.clear();
-    ag_node->outputs.push_back(outputs[i]);
-    outputs[i].entry_ = AGNodeEntry{ag_node, i, 0};
-  }
+  ag_node->state = state;
 
   for (size_t i = 0; i < inputs.size(); ++i) {
     if (inputs[i].entry_.is_none()) {
@@ -140,6 +129,18 @@ AGNodePtr AutogradRuntime::RecordOp(const nnvm::Op* op,
     }
     nn_node->inputs.push_back(inputs[i].entry_.nn_entry());
     ag_node->inputs.push_back(inputs[i].entry_);
+  }
+
+  for (uint32_t i = 0; i < outputs.size(); ++i) {
+    CHECK(outputs[i].entry_.is_none())
+      << "Inplace operation is not supported when recording with autograd. "
+      << "Assigning to NDArrays that are already in a computational graph "
+      << "will cause undefined behavior when evaluating gradients. "
+      << "Please call backward first to clear the graph or do this out side of "
+      << "a record section. ";
+    outputs[i].entry_.clear();
+    ag_node->outputs.push_back(outputs[i]);
+    outputs[i].entry_ = AGNodeEntry{ag_node, i, 0};
   }
 
   return ag_node;
@@ -155,7 +156,7 @@ void AutogradRuntime::ComputeGradient(const std::vector<NDArray>& outputs,
   for (const auto& i : outputs) {
     CHECK(!i.entry_.is_none())
       << "Cannot differentiate node because it is not in a computational graph. "
-      << "You need to set is_training to true or use a train_section to save "
+      << "You need to set is_training to true or use autograd.record() to save "
       << "computational graphs for backward. If you want to differentiate the same "
       << "graph twice, you need to pass retain_graph=True to backward.";
     heads.emplace_back(i.entry_);
@@ -167,13 +168,13 @@ void AutogradRuntime::ComputeGradient(const std::vector<NDArray>& outputs,
   std::vector<NDArray> args, args_grad;
   std::vector<NDArray> aux_states;
   std::vector<OpReqType> grad_reqs;
-  std::unordered_map<const nnvm::Node*, std::shared_ptr<Operator>> saved_opr;
+  std::unordered_map<const nnvm::Node*, OpStatePtr> saved_states;
   AGDFSVisit(heads, [&](const AGNodePtr& n) {
       if (n->nn_node->is_variable()) {
         vlist.push_back(n);
       } else {
-        if (n->opr != nullptr) {
-          saved_opr.insert({n->nn_node.get(), n->opr});
+        if (n->state) {
+          saved_states.insert({n->nn_node.get(), n->state});
         }
         if (fmutate_inputs.count(n->nn_node->op())) {
           for (uint32_t i : fmutate_inputs[n->nn_node->op()](n->nn_node->attrs)) {
@@ -203,7 +204,7 @@ void AutogradRuntime::ComputeGradient(const std::vector<NDArray>& outputs,
     std::map<std::string, Context> ctx_map;
     auto exec = new exec::GraphExecutor();
     // (TODO) too hack here
-    exec->saved_opr_ = saved_opr;
+    exec->saved_states_ = saved_states;
     exec->Init(sym, args[0].ctx(), ctx_map,
                args, args_grad, grad_reqs,
                aux_states, nullptr, feed_dict);

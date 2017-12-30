@@ -189,11 +189,17 @@ endif
 endif
 
 # ps-lite
-PS_PATH=$(ROOTDIR)/ps-lite
+PS_ORIG=$(ROOTDIR)/ps-lite
+PS_RDMA=$(ROOTDIR)/ps-rdma
+ifeq ($(USE_RDMA), 1)
+	PS_PATH=$(PS_RDMA)
+else
+	PS_PATH=$(PS_ORIG)
+endif
 DEPS_PATH=$(shell pwd)/deps
 include $(PS_PATH)/make/ps.mk
 ifeq ($(USE_DIST_KVSTORE), 1)
-	CFLAGS += -DMXNET_USE_DIST_KVSTORE -I$(PS_PATH)/include -I$(DEPS_PATH)/include
+	CFLAGS += -DMXNET_USE_DIST_KVSTORE -I$(PS_PATH)/include -I$(DEPS_PATH)/include -libverbs -lmlx4
 	LIB_DEP += $(PS_PATH)/build/libps.a
 	LDFLAGS += $(PS_LDFLAGS_A)
 endif
@@ -434,7 +440,8 @@ clean: cyclean $(EXTRA_PACKAGES_CLEAN)
 	$(RM) -r build lib bin *~ */*~ */*/*~ */*/*/*~ R-package/NAMESPACE R-package/man R-package/R/mxnet_generated.R \
 		R-package/inst R-package/src/*.o R-package/src/*.so mxnet_*.tar.gz
 	cd $(DMLC_CORE); $(MAKE) clean; cd -
-	cd $(PS_PATH); $(MAKE) clean; cd -
+	cd $(PS_ORIG); $(MAKE) clean; cd -
+	cd $(PS_RDMA); $(MAKE) clean; cd -
 	cd $(NNVM_PATH); $(MAKE) clean; cd -
 	$(RM) -r  $(patsubst %, %/*.d, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.d, $(EXTRA_OPERATORS))
 	$(RM) -r  $(patsubst %, %/*.o, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.o, $(EXTRA_OPERATORS))
@@ -443,7 +450,8 @@ clean: cyclean testclean $(EXTRA_PACKAGES_CLEAN)
 	$(RM) -r build lib bin *~ */*~ */*/*~ */*/*/*~ R-package/NAMESPACE R-package/man R-package/R/mxnet_generated.R \
 		R-package/inst R-package/src/*.o R-package/src/*.so mxnet_*.tar.gz
 	cd $(DMLC_CORE); $(MAKE) clean; cd -
-	cd $(PS_PATH); $(MAKE) clean; cd -
+	cd $(PS_ORIG); $(MAKE) clean; cd -
+	cd $(PS_RDMA); $(MAKE) clean; cd -
 	cd $(NNVM_PATH); $(MAKE) clean; cd -
 endif
 
@@ -456,3 +464,11 @@ clean_all: clean
 ifneq ($(EXTRA_OPERATORS),)
 	-include $(patsubst %, %/*.d, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.d, $(EXTRA_OPERATORS))
 endif
+
+.PHONY: runimg
+cmplrdma:
+	make -j $(nproc) USE_OPENCV=1 USE_BLAS=openblas USE_DIST_KVSTORE=1 USE_RDMA=1
+cmplorig:
+	make -j $(nproc) USE_OPENCV=1 USE_BLAS=openblas USE_DIST_KVSTORE=1
+runimg:
+	python tools/launch.py -n 4  --launcher ssh -H hosts python example/image-classification/train_mnist.py --network mlp --kv-store dist_sync
